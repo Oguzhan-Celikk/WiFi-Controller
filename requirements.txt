@@ -1,0 +1,5 @@
+scapy
+customtkinter
+packaging
+mac-vendor-lookup
+python-nmap
