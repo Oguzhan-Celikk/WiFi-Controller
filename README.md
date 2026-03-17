@@ -1,4 +1,4 @@
-# WiFi Controller Pro
+# WiFi Controller 
 
 Windows icin basit bir yerel ag yonetim araci. Agdaki cihazlari tarar, cihazlara isim verebilir ve secilen cihazin internet erisimini gecici olarak kesip geri verebilir. Arayuz customtkinter ile yazilmistir.
 
@@ -58,7 +58,7 @@ python main.py
 
 ## Yapilandirma
 
-Ag tarama ve ag gecidi IP'lerini kendi agina gore guncelle.
+Ag tarama ve ag gecidi (modem) IP'lerini kendi agina gore guncelle. Bu satirlara kendi modem IP'ni ve ag araligini yazman gerekir.
 
 - Tarama araligi: [gui_app.py](gui_app.py#L40) icindeki `scan_network("192.***.*.*/**")`
 - Gateway IP: [gui_app.py](gui_app.py#L77) icindeki `gateway_ip = "192.***.*.*"`
