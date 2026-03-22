@@ -67,6 +67,10 @@ class WifiApp(ctk.CTk):
                            command=lambda d=dev: self.open_rename_dialog(d))
         rename_btn.pack(side="right", padx=5)
 
+        monitor_btn = ctk.CTkButton(frame, text="Takip Et", fg_color="#fb8c00", hover_color="#ef6c00", 
+                            width=100, command=lambda d=dev: self.toggle_monitoring(d, monitor_btn))
+        monitor_btn.pack(side="right", padx=10)
+
     def toggle_connection(self, device, button):
         # Eğer buton "İnterneti Kes" modundaysa (Kırmızı)
         if button.cget("text") == "İnterneti Kes":
@@ -107,6 +111,20 @@ class WifiApp(ctk.CTk):
         timestamp = time.strftime("%H:%M:%S")
         self.log_box.insert("end", f"[{timestamp}] {message}\n")
         self.log_box.see("end") # Otomatik aşağı kaydır
+
+    def toggle_monitoring(self, device, button):
+        if button.cget("text") == "Takip Et":
+            # Takibi başlat
+            gateway_ip = "192.168.1.1" # Kendi gateway IP'n
+            self.nm.start_monitoring(device['ip'], gateway_ip, device['mac'], self.update_log)
+            
+            button.configure(text="Takibi Bırak", fg_color="#546e7a", hover_color="#455a64")
+            self.status_label.configure(text=f"İzleniyor: {device['ip']}", text_color="#fb8c00")
+        else:
+            # Takibi durdur
+            self.nm.stop_monitoring()
+            button.configure(text="Takip Et", fg_color="#fb8c00", hover_color="#ef6c00")
+            self.status_label.configure(text="Durum: İzleme Durduruldu", text_color="gray")
 
 if __name__ == "__main__":
     app = WifiApp()

